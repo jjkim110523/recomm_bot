@@ -6,19 +6,26 @@ import logging
 import sqlite3
 import lightfm
 import pickle
-from recsys import *
 import time
 import pandas as pd
+#from train_model import sample_recommendation_user
+from temp_train_model import recommendation_user
+from bot_action import *
+
+logger = telebot.logger
+telebot.logger.setLevel(logging.DEBUG)
 
 #webhook 설정에 필요한 정보들
-WEBHOOK_LISTEN = ""
-WEBHOOK_PORT = 
+WEBHOOK_LISTEN = "0.0.0.0"
+WEBHOOK_PORT = 8443
 
-WEBHOOK_SSL_CERT = ""
-WEBHOOK_SSL_PRIV = ""
+WEBHOOK_SSL_CERT = "/etc/letsencrypt/live/commelier.ml/fullchain.pem"
+WEBHOOK_SSL_PRIV = "/etc/letsencrypt/live/commelier.ml/privkey.pem"
 
-API_TOKEN = ""
+API_TOKEN = "604582951:AAGCfEB-GsjenkFBE6eR04sK_Pzmd2kWjCc"
 bot = telebot.TeleBot(API_TOKEN)
+
+db_path="./glow_db.sqlite3"
 
 #app 생성
 app = web.Application()
@@ -26,8 +33,7 @@ app = web.Application()
 #자주 쓰이는 챗봇 키보드 레이아웃을 미리 만들어 놓는다.
 reply_keyboard = [['스킨', '로션', '에센스'],
                   ['10대', '20대 초반', '20대 후반', '30대 초반', '30대 후반 이상'],
-                  ['건성', '지성', '중성', '복합성', '민감성']
-                  ]
+                  ['건성', '지성', '중성', '복합성', '민감성']]
 
 #도움말 챗 스크립트(/help)
 help_string = []
@@ -67,7 +73,7 @@ async def handle(request):
 app.router.add_post("/{token}/", handle)
 
 
-#챗봇 기능
+###############챗봇 기능##################
 
 #입장시 인사 및 도움말을 제공하는 기능
 @bot.message_handler(commands=["start"])
@@ -87,6 +93,7 @@ def send_top_5(message):
         
         #추천 받고 싶은 제품 종류를 선택하고 정보를 다음 함수로 넘겨준다.
         bot.register_next_step_handler(msg, process_top_step)
+
     except Exception as e:
         bot.reply_to(message, "뭔가 잘못된거 같아요")
 
@@ -97,16 +104,7 @@ def process_top_step(message):
     chat_id = message.chat.id
     product_type = (str(message.text),)
 
-    conn=sqlite3.connect("./glow_db.sqlite3")
-
-    c=conn.cursor()
-
-    rows= c.execute("select brand_name,product_name, product_img, product_vol, \
-    product_price from products where product_type=? and product_rank between 1 and 5",product_type)
-
-    content=rows.fetchall()
-    conn.close()
-
+    content=query_for_top5(db_path, product_type)
 
     #순차적으로 추천 제품을 메세지로 보낸다.
     for row in range(len(content)):
@@ -121,6 +119,7 @@ def process_top_step(message):
 #글로우 픽의 랭킹에 등록되어있는 제품에 리뷰를 남긴 사용자(헤비 유저)에게 리뷰 정보를 기반으로 추천을 해주는 기능
 #기본 알고리즘으로 빠르고 가벼운 lightFM을 사용하였다. 이후 해야할 일은 제품별 알고리즘을 만들고 저장하고 로드하는
 #방식으로 바꾸는 일이다.
+
 @bot.message_handler(commands=["recomm"])
 # 해당 핸들러의 흐름은 다음과 같다.
 # 1. 원하는 제품 종류 입력
@@ -128,7 +127,6 @@ def process_top_step(message):
 # 3-1. lightFM 작동의 경우, DB쿼리를 통해 원하는 정보를 추출하고 알고리즘에 맞는 형태의 데이터로 전처리하고
 # 알고리즘을 작동시킨다.
 # 3-2. 추천 방식을 물어본다. 추천 방식에는 베스트 랭킹, 신규 유저, 필요없음 이 있다.
-
 
 def check_product_type(message):
     try:
@@ -163,66 +161,20 @@ def check_recomm_method_step(message):
     user=user_dict[chat_id]
     user.name=name
 
-    conn=sqlite3.connect("./glow_db.sqlite3")
-
-    c=conn.cursor()
-
-    rows= c.execute("select * from reviews left join products on reviews.product_id=products.product_id\
-    where products.product_type=? and reviews.user_name=?" ,(user.product_type, user.name))
-
-    content=rows.fetchall()
+    content=query_for_heavy_check(db_path, user.product_type, user.name)
 
     if len(content)==0:
         markup = types.ReplyKeyboardMarkup(one_time_keyboard=True)
         markup.row("베스트 랭킹", "신규 추천", "필요없어")
-        msg=bot.reply_to(message, "해당 아이디는 리뷰를 남긴 적이 없어요ㅜㅜ.\n대신에 베스트 화장품이나 신규 추천을 해드릴까요?", reply_markup=markup)
+        msg=bot.reply_to(message, "해당 아이디는 리뷰를 남긴 적이 없어요ㅜㅜ.\n대신에 베스트 화장품이나 신규 유저 추천을 해드릴까요?", reply_markup=markup)
 
         bot.register_next_step_handler(msg, check_which_way)
     else:
-        
         try:
-            ratings=c.execute("select * from ratings where product_id in (select product_id from products where product_type=?)",(user.product_type,))
-            ratings=ratings.fetchall()
-            ratings=pd.DataFrame(columns=["user_id", "product_id", "rating"] ,data=ratings).copy()
-
-            products= c.execute("select product_id, brand_name, product_name, product_img, product_vol, product_price from products where product_type=?",(user.product_type,))
-            products=products.fetchall()
-            products=pd.DataFrame(columns=["product_id", "brand_name", "product_name", "product_img", "product_vol", \
-                "product_price"], data=products).copy()
-
-            user_id=c.execute("select user_id from users where user_name=?",(user.name,))
-            user_id=user_id.fetchone()
-            user_id=user_id[0]
-
-            # Creating interaction matrix using rating data
-            interactions = create_interaction_matrix(df = ratings,
-                                                    user_col = 'user_id',\
-                                                    item_col = 'product_id',\
-                                                    rating_col = 'rating')
-
-            # Create User Dict
-            user_info = create_user_dict(interactions=interactions)
-            # Create Item dict
-            product_info = create_item_dict(df = products,\
-                                        id_col = 'product_id',\
-                                        name_col = 'product_name')
-
-            mf_model = runMF(interactions = interactions)
-
-            ## Calling 10 movie recommendation for user id 11
-            rec_list = sample_recommendation_user(model = mf_model, \
-                                                interactions = interactions, \
-                                                user_id = user_id, \
-                                                user_dict = user_info,\
-                                                item_dict = product_info, \
-                                                threshold = 4,\
-                                                nrec_items = 5,\
-                                                show = False)
-            recomm=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-            product_id=? or product_id=? or product_id=? or product_id=?",(rec_list[0],rec_list[1],rec_list[2],rec_list[3],rec_list[4]))
-
-            recomms=recomm.fetchall()
-            conn.close()
+            user_id=get_user_id(db_path, user.name)
+            recomms=recommendation_user(user_id, user.product_type)
+            recomms=heavy_recomm(db_path,recomms)
+            
             for row in range(len(recomms)):
                 msg_upper=recomms[row][0]+"\n"+recomms[row][1]
                 msg_lower=recomms[row][3]+" / "+recomms[row][4]
@@ -243,15 +195,8 @@ def check_which_way(message):
         user=user_dict[chat_id]
         product_type = (str(user.product_type),)
 
-        conn=sqlite3.connect("./glow_db.sqlite3")
+        content=query_for_top5(db_path, product_type)
 
-        c=conn.cursor()
-
-        rows= c.execute("select brand_name,product_name, product_img, product_vol, \
-        product_price from products where product_type=? and product_rank between 1 and 5",product_type)
-
-        content=rows.fetchall()
-        conn.close()
         for row in range(len(content)):
             msg_upper=content[row][0]+"\n"+content[row][1]
             msg_lower=content[row][3]+" / "+content[row][4]
@@ -313,310 +258,157 @@ def process_no_skin_type_step(message):
         
         #나이, 스킨 타입, 제품 종류를 필터링한다.
         if user.age=="10대":
-            conn=sqlite3.connect("./glow_db.sqlite3")
-
-            c=conn.cursor()
-            
-            rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 10 and 19) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=10\
-                            LIMIT 5",(str(user.product_type), str(user.skin_type),))
-            content = rows.fetchall()
+            content = query_for_teenage(db_path, user.product_type, user.skin_type)
 
             #현재로써는 데이터가 부족하여 필터링 후 5개 추천 항목이 나오지 않으면 필터링 조건을 완화하여 3가지 제품을 추천한다.
             if len(content)<5:
-                rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 10 and 19) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=3\
-                            LIMIT 3",(str(user.product_type), str(user.skin_type),))
-                content=rows.fetchall()
-                
-                rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1]))
+                content = query_for_teenage_len3(db_path, user.product_type, user.skin_type)         
 
-                rec_list=rec_list.fetchall()
+                rec_list=filtering_rec_list_len3(db_path, content)
 
                 #추천 결과 전송
                 for row in range(len(rec_list)):
                     msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
                     msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
                     
-                    
+                    #bot.send_message(chat_id, msg_upper)
                     bot.send_photo(chat_id, photo=rec_list[row][2], \
                     caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
                     parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-            
-            rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-            product_id=? or product_id=? or product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],content[3][1],content[4][1]))
-            
-            rec_list=rec_list.fetchall()
-
-            for row in range(len(rec_list)):
-                msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
-                
-                
-                bot.send_photo(chat_id, photo=rec_list[row][2], \
-                caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
-                parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-            c.close()
-        
-        if user.age=="20대 초반":
-            conn=sqlite3.connect("./glow_db.sqlite3")
-            c=conn.cursor()
-
-            rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                        FROM ratings as r\
-                        LEFT JOIN products AS p\
-                        ON r.product_id=p.product_id\
-                        LEFT JOIN users AS u\
-                        ON  r.user_id=u.user_id\
-                        WHERE (p.product_type=?) and (u.age between 20 and 24) and (u.skin_type=?)\
-                        GROUP BY p.product_id\
-                        HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=10\
-                        LIMIT 5",(user.product_type, user.skin_type))
-            content = rows.fetchall()
-
-            if len(content)<5:
-                rows= c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 20 and 24) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=3\
-                            LIMIT 3",(user.product_type, user.skin_type))
-                content=rows.fetchall()
-
-                rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],))
-                
-                rec_list=rec_list.fetchall()
+            else:
+                rec_list=filtering_rec_list(db_path, content)
 
                 for row in range(len(rec_list)):
                     msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
                     msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
                     
-                    
+                    #bot.send_message(chat_id, msg_upper)
                     bot.send_photo(chat_id, photo=rec_list[row][2], \
                     caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
                     parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
             
-            rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-            product_id=? or product_id=? or product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],content[3][1],content[4][1]))
+        if user.age=="20대 초반":
+            content = query_for_early_tweenties(db_path, user.product_type, user.skin_type)
 
-            rec_list=rec_list.fetchall()
+            if len(content)<5:
                 
-            for row in range(len(rec_list)):
-                msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
+                content = query_for_early_tweenties_len3(db_path, user.product_type, user.skin_type)
                 
-                
-                bot.send_photo(chat_id, photo=rec_list[row][2], \
-                caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
-                parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-            c.close()
+                rec_list=filtering_rec_list_len3(db_path, content)
+
+                for row in range(len(rec_list)):
+                    msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
+                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
+                    
+                    #bot.send_message(chat_id, msg_upper)
+                    bot.send_photo(chat_id, photo=rec_list[row][2], \
+                    caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
+                    parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
+            else:
+                rec_list=filtering_rec_list(db_path, content)
+                    
+                for row in range(len(rec_list)):
+                    msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
+                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
+                    
+                    #bot.send_message(chat_id, msg_upper)
+                    bot.send_photo(chat_id, photo=rec_list[row][2], \
+                    caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
+                    parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
 
         if user.age=="20대 후반":
-            conn=sqlite3.connect("./glow_db.sqlite3")
-
-            c=conn.cursor()
-
-            rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 25 and 29) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=10\
-                            LIMIT 5",(user.product_type, user.skin_type))
-            content = rows.fetchall()
+            content = query_for_late_tweenties(db_path, user.product_type, user.skin_type)
 
             if len(content)<5:
-                rows= c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 25 and 29) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=3\
-                            LIMIT 3",(user.product_type, user.skin_type))
-                content=rows.fetchall()
-
-                rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],))
-
-                rec_list=rec_list.fetchall()
+                content = query_for_late_tweenties_len3(db_path, user.product_type, user.skin_type)
+                
+                rec_list=filtering_rec_list_len3(db_path, content)                
 
                 for row in range(len(rec_list)):
                     msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
                     msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
                     
-                    
+                    #bot.send_message(chat_id, msg_upper)
                     bot.send_photo(chat_id, photo=rec_list[row][2], \
                     caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
                     parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-            
-            rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-            product_id=? or product_id=? or product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],content[3][1],content[4][1]))
-            
-            rec_list=rec_list.fetchall()
+            else:
+                rec_list=filtering_rec_list(db_path, content)
 
-            for row in range(len(rec_list)):
-                msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
-                
-                
-                bot.send_photo(chat_id, photo=rec_list[row][2], \
-                caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
-                parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-            c.close()
+                for row in range(len(rec_list)):
+                    msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
+                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
+                    
+                    #bot.send_message(chat_id, msg_upper)
+                    bot.send_photo(chat_id, photo=rec_list[row][2], \
+                    caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
+                    parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
 
         if user.age=="30대 초반":
-            conn=sqlite3.connect("./glow_db.sqlite3")
-
-            c=conn.cursor()
-
-            rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 30 and 34) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=10\
-                            LIMIT 5",(user.product_type, user.skin_type))
-            content = rows.fetchall()
+            content = query_for_early_thirties(db_path, user.product_type, user.skin_type)
 
             if len(content)<5:
-                rows= c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 30 and 34) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=3\
-                            LIMIT 3",(user.product_type, user.skin_type))
-                content=rows.fetchall()
-
-                rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],))
-
-                rec_list=rec_list.fetchall()
+                content = query_for_early_thirties_len3(db_path, user.product_type, user.skin_type)
+                rec_list=filtering_rec_list_len3(db_path, content)
 
                 for row in range(len(rec_list)):
                     msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
                     msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
                     
+                    #bot.send_message(chat_id, msg_upper)
                     bot.send_photo(chat_id, photo=rec_list[row][2], \
                     caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
                     parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-            
-            rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-            product_id=? or product_id=? or product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],content[3][1],content[4][1]))
+            else:
+                rec_list=filtering_rec_list(db_path, content)
                 
-            rec_list=rec_list.fetchall()
-
-            for row in range(len(rec_list)):
-                msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                msg_lower=rec_list[row][3]+" / "+rec_list[row][4]            
+                for row in range(len(rec_list)):
+                    msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
+                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
                 
-                bot.send_photo(chat_id, photo=rec_list[row][2], \
-                caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
-                parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-            
-            c.close()
+                    #bot.send_message(chat_id, msg_upper)
+                    bot.send_photo(chat_id, photo=rec_list[row][2], \
+                    caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
+                    parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
 
         if user.age=="30대 후반 이상":
-                conn=sqlite3.connect("./glow_db.sqlite3")
-
-                c=conn.cursor()
-
-                rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                                FROM ratings as r\
-                                LEFT JOIN products AS p\
-                                ON r.product_id=p.product_id\
-                                LEFT JOIN users AS u\
-                                ON  r.user_id=u.user_id\
-                                WHERE (p.product_type=?) and (u.age >= 35) and (u.skin_type=?)\
-                                GROUP BY p.product_id\
-                                HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=10\
-                                LIMIT 5",(user.product_type, user.skin_type))
-                content = rows.fetchall()
+                content = query_for_late_thirties(db_path, user.product_type, user.skin_type)
 
                 if len(content)<5:
-                    rows= c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                                FROM ratings as r\
-                                LEFT JOIN products AS p\
-                                ON r.product_id=p.product_id\
-                                LEFT JOIN users AS u\
-                                ON  r.user_id=u.user_id\
-                                WHERE (p.product_type=?) and (u.age >= 35) and (u.skin_type=?)\
-                                GROUP BY p.product_id\
-                                HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=3\
-                                LIMIT 3",(user.product_type, user.skin_type))
-                    content=rows.fetchall()
-
-                    rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                    product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],))
-
-                    rec_list=rec_list.fetchall()
+                    content = query_for_late_thirties_len3(db_path, user.product_type, user.skin_type)
+                    rec_list=filtering_rec_list_len3(db_path, content)
 
                     for row in range(len(rec_list)):
                         msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
                         msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
                         
-                        
+                        #bot.send_message(chat_id, msg_upper)
                         bot.send_photo(chat_id, photo=rec_list[row][2], \
                         caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
                         parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-                
-                rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                product_id=? or product_id=? or product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],content[3][1],content[4][1]))
-                
-                rec_list=rec_list.fetchall()
+                else:
+                    rec_list=filtering_rec_list(db_path, content)
 
-                for row in range(len(rec_list)):
-                    msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
-                    
-                    
-                    bot.send_photo(chat_id, photo=rec_list[row][2], \
-                    caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
-                    parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-
-                c.close()
-
-        time.sleep(3)
-        bot.send_message(message.chat.id, "감사합니다.^^")
+                    for row in range(len(rec_list)):
+                        msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
+                        msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
+                        
+                        #bot.send_message(chat_id, msg_upper)
+                        bot.send_photo(chat_id, photo=rec_list[row][2], \
+                        caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
+                        parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
     except Exception as e:
         bot.reply_to(message, '뭔가 잘못된거 같아요ㅠㅠ')
+        
+    time.sleep(3)
+    bot.reply_to(message, "감사합니다.^^")
 
 
-
-#신규 유저에게 필터링을 통한 추천 서비스를 제공한다. 위에서 제공한 필터링과 동일한 기능
+# 신규 유저에게 필터링을 통한 추천 서비스를 제공한다. 위에서 제공한 필터링과 동일한 기능
 @bot.message_handler(commands=["new"])
+# def send_recomm_light(message):
+#     msg=bot.reply_to(message, "리뷰나 추천 내역이 없습니다.\n글로우픽 닉네임이 어떻게 되나요?")
+#     bot.register_next_step_handler(msg, process_name_step)
 def process_name_step(message):
     try:
         chat_id=message.chat.id
@@ -660,11 +452,13 @@ def process_age_step(message):
             user.age = age
         else:
             raise Exception()
+
         markup = types.ReplyKeyboardMarkup(one_time_keyboard=True)
         markup.row(reply_keyboard[2][0], reply_keyboard[2][1], reply_keyboard[2][2])
         markup.row(reply_keyboard[2][3], reply_keyboard[2][4])
         msg = bot.reply_to(message, '피부 타입은 어떻게 되세요?', reply_markup=markup)
         bot.register_next_step_handler(msg, process_skin_type_step)
+
     except Exception as e:
         bot.reply_to(message, '뭔가 잘못된거 같아요ㅠㅠ')
 
@@ -681,317 +475,154 @@ def process_skin_type_step(message):
         else:
             raise Exception()
        
+        #나이, 스킨 타입, 제품 종류를 필터링한다.
         if user.age=="10대":
-            conn=sqlite3.connect("./glow_db.sqlite3")
+            content = query_for_teenage(db_path, user.product_type, user.skin_type)
 
-            c=conn.cursor()
-            
-            rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 10 and 19) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=10\
-                            LIMIT 5",(str(user.product_type), str(user.skin_type),))
-            content = rows.fetchall()
-
+            #현재로써는 데이터가 부족하여 필터링 후 5개 추천 항목이 나오지 않으면 필터링 조건을 완화하여 3가지 제품을 추천한다.
             if len(content)<5:
-                rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 10 and 19) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=3\
-                            LIMIT 3",(str(user.product_type), str(user.skin_type),))
-                content=rows.fetchall()
-                
-                rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1]))
+                content = query_for_teenage_len3(db_path, user.product_type, user.skin_type)         
 
-                rec_list=rec_list.fetchall()
+                rec_list=filtering_rec_list_len3(db_path, content)
+
+                #추천 결과 전송
+                for row in range(len(rec_list)):
+                    msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
+                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
+                    
+                    #bot.send_message(chat_id, msg_upper)
+                    bot.send_photo(chat_id, photo=rec_list[row][2], \
+                    caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
+                    parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
+            else:
+                rec_list=filtering_rec_list(db_path, content)
 
                 for row in range(len(rec_list)):
                     msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
                     msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
                     
-                    
+                    #bot.send_message(chat_id, msg_upper)
                     bot.send_photo(chat_id, photo=rec_list[row][2], \
                     caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
                     parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-                
-                c.close()
-
-                return
-            
-            rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-            product_id=? or product_id=? or product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],content[3][1],content[4][1]))
-            
-            rec_list=rec_list.fetchall()
-
-            for row in range(len(rec_list)):
-                msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
-                
-                
-                bot.send_photo(chat_id, photo=rec_list[row][2], \
-                caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
-                parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-            c.close()
         
         if user.age=="20대 초반":
-            conn=sqlite3.connect("./glow_db.sqlite3")
-            c=conn.cursor()
-
-            rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                        FROM ratings as r\
-                        LEFT JOIN products AS p\
-                        ON r.product_id=p.product_id\
-                        LEFT JOIN users AS u\
-                        ON  r.user_id=u.user_id\
-                        WHERE (p.product_type=?) and (u.age between 20 and 24) and (u.skin_type=?)\
-                        GROUP BY p.product_id\
-                        HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=10\
-                        LIMIT 5",(user.product_type, user.skin_type))
-            content = rows.fetchall()
+            content = query_for_early_tweenties(db_path, user.product_type, user.skin_type)
 
             if len(content)<5:
-                rows= c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 20 and 24) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=3\
-                            LIMIT 3",(user.product_type, user.skin_type))
-                content=rows.fetchall()
-
-                rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],))
                 
-                rec_list=rec_list.fetchall()
+                content = query_for_early_tweenties_len3(db_path, user.product_type, user.skin_type)
+                
+                rec_list=filtering_rec_list_len3(db_path, content)
 
                 for row in range(len(rec_list)):
                     msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
                     msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
-                
+                    
+                    #bot.send_message(chat_id, msg_upper)
                     bot.send_photo(chat_id, photo=rec_list[row][2], \
                     caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
                     parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-                
-                c.close()
-
-                return
-            
-            rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-            product_id=? or product_id=? or product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],content[3][1],content[4][1]))
-
-            rec_list=rec_list.fetchall()
-                
-            for row in range(len(rec_list)):
-                msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
-                
-                bot.send_photo(chat_id, photo=rec_list[row][2], \
-                caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
-                parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-            c.close()
+            else:
+                rec_list=filtering_rec_list(db_path, content)
+                    
+                for row in range(len(rec_list)):
+                    msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
+                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
+                    
+                    #bot.send_message(chat_id, msg_upper)
+                    bot.send_photo(chat_id, photo=rec_list[row][2], \
+                    caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
+                    parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
 
         if user.age=="20대 후반":
-            conn=sqlite3.connect("./glow_db.sqlite3")
-
-            c=conn.cursor()
-
-            rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 25 and 29) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=10\
-                            LIMIT 5",(user.product_type, user.skin_type))
-            content = rows.fetchall()
+            content = query_for_late_tweenties(db_path, user.product_type, user.skin_type)
 
             if len(content)<5:
-                rows= c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 25 and 29) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=3\
-                            LIMIT 3",(user.product_type, user.skin_type))
-                content=rows.fetchall()
-
-                rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],))
-
-                rec_list=rec_list.fetchall()
+                content = query_for_late_tweenties_len3(db_path, user.product_type, user.skin_type)
+                
+                rec_list=filtering_rec_list_len3(db_path, content)                
 
                 for row in range(len(rec_list)):
                     msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
                     msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
                     
+                    #bot.send_message(chat_id, msg_upper)
                     bot.send_photo(chat_id, photo=rec_list[row][2], \
                     caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
                     parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-                
-                c.close()
-
-                return
-            
-            rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-            product_id=? or product_id=? or product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],content[3][1],content[4][1]))
-            
-            rec_list=rec_list.fetchall()
-
-            for row in range(len(rec_list)):
-                msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
-                
-                
-                bot.send_photo(chat_id, photo=rec_list[row][2], \
-                caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
-                parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-            c.close()
-
-        if user.age=="30대 초반":
-            conn=sqlite3.connect("./glow_db.sqlite3")
-
-            c=conn.cursor()
-
-            rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 30 and 34) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=10\
-                            LIMIT 5",(user.product_type, user.skin_type))
-            content = rows.fetchall()
-
-            if len(content)<5:
-                rows= c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                            FROM ratings as r\
-                            LEFT JOIN products AS p\
-                            ON r.product_id=p.product_id\
-                            LEFT JOIN users AS u\
-                            ON  r.user_id=u.user_id\
-                            WHERE (p.product_type=?) and (u.age between 30 and 34) and (u.skin_type=?)\
-                            GROUP BY p.product_id\
-                            HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=3\
-                            LIMIT 3",(user.product_type, user.skin_type))
-                content=rows.fetchall()
-
-                rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],))
-
-                rec_list=rec_list.fetchall()
+            else: 
+                rec_list=filtering_rec_list(db_path, content)
 
                 for row in range(len(rec_list)):
                     msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]                    
+                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
                     
+                    #bot.send_message(chat_id, msg_upper)
                     bot.send_photo(chat_id, photo=rec_list[row][2], \
                     caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
                     parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-                
-                c.close()
 
-                return
-            
-            rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-            product_id=? or product_id=? or product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],content[3][1],content[4][1]))
-                
-            rec_list=rec_list.fetchall()
+        if user.age=="30대 초반":
+            content = query_for_early_thirties(db_path, user.product_type, user.skin_type)
 
-            for row in range(len(rec_list)):
-                msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                msg_lower=rec_list[row][3]+" / "+rec_list[row][4]            
+            if len(content)<5:
+                content = query_for_early_thirties_len3(db_path, user.product_type, user.skin_type)
+                rec_list=filtering_rec_list_len3(db_path, content)
+
+                for row in range(len(rec_list)):
+                    msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
+                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
+                    
+                    #bot.send_message(chat_id, msg_upper)
+                    bot.send_photo(chat_id, photo=rec_list[row][2], \
+                    caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
+                    parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
+            else:
+                rec_list=filtering_rec_list(db_path, content)
                 
-                bot.send_photo(chat_id, photo=rec_list[row][2], \
-                caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
-                parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-            
-            c.close()
+                for row in range(len(rec_list)):
+                    msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
+                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
+                
+                    #bot.send_message(chat_id, msg_upper)
+                    bot.send_photo(chat_id, photo=rec_list[row][2], \
+                    caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
+                    parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
+                    time.sleep(2)
 
         if user.age=="30대 후반 이상":
-                conn=sqlite3.connect("./glow_db.sqlite3")
-
-                c=conn.cursor()
-
-                rows = c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                                FROM ratings as r\
-                                LEFT JOIN products AS p\
-                                ON r.product_id=p.product_id\
-                                LEFT JOIN users AS u\
-                                ON  r.user_id=u.user_id\
-                                WHERE (p.product_type=?) and (u.age >= 35) and (u.skin_type=?)\
-                                GROUP BY p.product_id\
-                                HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=10\
-                                LIMIT 5",(user.product_type, user.skin_type))
-                content = rows.fetchall()
+                content = query_for_late_thirties(db_path, user.product_type, user.skin_type)
 
                 if len(content)<5:
-                    rows= c.execute("Select u.user_id, p.product_id, AVG(r.rating), COUNT(r.rating)\
-                                FROM ratings as r\
-                                LEFT JOIN products AS p\
-                                ON r.product_id=p.product_id\
-                                LEFT JOIN users AS u\
-                                ON  r.user_id=u.user_id\
-                                WHERE (p.product_type=?) and (u.age >= 35) and (u.skin_type=?)\
-                                GROUP BY p.product_id\
-                                HAVING AVG(r.rating)>=4 and COUNT(r.rating)>=3\
-                                LIMIT 3",(user.product_type, user.skin_type))
-                    content=rows.fetchall()
-
-                    rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                    product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],))
-
-                    rec_list=rec_list.fetchall()
+                    content = query_for_late_thirties_len3(db_path, user.product_type, user.skin_type)
+                    rec_list=filtering_rec_list_len3(db_path, content)
 
                     for row in range(len(rec_list)):
                         msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                        msg_lower=rec_list[row][3]+" / "+rec_list[row][4]                        
+                        msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
                         
+                        #bot.send_message(chat_id, msg_upper)
                         bot.send_photo(chat_id, photo=rec_list[row][2], \
                         caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
                         parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-                    
-                    c.close()
-
-                    return
                 
-                rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                product_id=? or product_id=? or product_id=? or product_id=?",(content[0][1],content[1][1],content[2][1],content[3][1],content[4][1]))
-                
-                rec_list=rec_list.fetchall()
+                else:                
+                    rec_list=filtering_rec_list(db_path, content)
 
-                for row in range(len(rec_list)):
-                    msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
-                    msg_lower=rec_list[row][3]+" / "+rec_list[row][4]                    
-                    
-                    bot.send_photo(chat_id, photo=rec_list[row][2], \
-                    caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
-                    parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-
-                c.close() 
-
-    except Exception as e:
+                    for row in range(len(rec_list)):
+                        msg_upper=rec_list[row][0]+"\n"+rec_list[row][1]
+                        msg_lower=rec_list[row][3]+" / "+rec_list[row][4]
+                        
+                        #bot.send_message(chat_id, msg_upper)
+                        bot.send_photo(chat_id, photo=rec_list[row][2], \
+                        caption="["+msg_upper+'\n'+msg_lower+"](https://www.glowpick.com/search/result?query="+rec_list[row][1].replace(" ","")+")",\
+                        parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
+    except:
         bot.reply_to(message, '뭔가 잘못된거 같아요ㅠㅠ')
+        
+    time.sleep(3)
+    bot.reply_to(message, "감사합니다.^^")
 
 #아무거나 입력할 때 안내를 도와준다.
 @bot.message_handler(func=lambda message: True, content_types=['text'])
@@ -999,7 +630,7 @@ def command_default(m):
     # this is the standard reply to a normal message
     bot.send_message(m.chat.id, "죄송합니다. 무슨 말씀인지 잘 모르겠습니다.\n /start 를 통해 기능을 살펴볼 수 있습니다. ^^") 
 
-# - - -
+###############################
 
 #ssl과 관련된 정보를 담고 있다.
 context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)

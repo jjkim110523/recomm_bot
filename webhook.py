@@ -16,13 +16,13 @@ logger = telebot.logger
 telebot.logger.setLevel(logging.DEBUG)
 
 #webhook 설정에 필요한 정보들
-WEBHOOK_LISTEN = "0.0.0.0"
-WEBHOOK_PORT = 8443
+WEBHOOK_LISTEN = ""
+WEBHOOK_PORT = 
 
-WEBHOOK_SSL_CERT = "/etc/letsencrypt/live/commelier.ml/fullchain.pem"
-WEBHOOK_SSL_PRIV = "/etc/letsencrypt/live/commelier.ml/privkey.pem"
+WEBHOOK_SSL_CERT = ""
+WEBHOOK_SSL_PRIV = ""
 
-API_TOKEN = "604582951:AAGCfEB-GsjenkFBE6eR04sK_Pzmd2kWjCc"
+API_TOKEN = ""
 bot = telebot.TeleBot(API_TOKEN)
 
 db_path="./glow_db.sqlite3"

@@ -41,8 +41,8 @@ help_string.append("*Commelier M.L* - Bonjour~! 안녕하세요!\n")
 help_string.append("화장품 추천 챗봇 *Commelier M.L* 입니다 @>~~\n\n")
 help_string.append("/start - 챗봇 도움말 보기\n")
 help_string.append("/top5 - 탑5 화장품 추천\n")
-help_string.append("/recomm - 기존 유저 추천 받기\n")
-help_string.append("/new - 신규 유저 추천 받기")
+help_string.append("/recomm - 회원 유저 추천 받기\n")
+help_string.append("/new - 비회원 유저 추천 받기")
 
 
 #유저 정보를 담아둘 변수를 생성
@@ -165,7 +165,8 @@ def check_recomm_method_step(message):
 
     if len(content)==0:
         markup = types.ReplyKeyboardMarkup(one_time_keyboard=True)
-        markup.row("베스트 랭킹", "신규 추천", "필요없어")
+        markup.row("베스트 랭킹", "비회원 추천", "필요없어")
+        
         msg=bot.reply_to(message, "해당 아이디는 리뷰를 남긴 적이 없어요ㅜㅜ.\n대신에 베스트 화장품이나 신규 유저 추천을 해드릴까요?", reply_markup=markup)
 
         bot.register_next_step_handler(msg, check_which_way)

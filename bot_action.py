@@ -77,6 +77,9 @@ def query_for_teenage_len3(db_path, product_type, skin_type):
 
     c.close()
 
+    for row in contents:
+        print(row)
+
     return contents
 
 def query_for_early_tweenties(db_path, product_type, skin_type):
@@ -276,7 +279,7 @@ def filtering_rec_list_len3(db_path, content):
     c=conn.cursor()
 
     rec_list=c.execute("select brand_name, product_name, product_img, product_vol, product_price from products where product_id=? or \
-                product_id=? or product_id=?",(int(content[0][1]),int(content[1][1]),int(content[2][1]), ))
+                product_id=? or product_id=?",(int(content[0][1]),int(content[1][1]),int(content[2][1])))
     
     rec_list=rec_list.fetchall()
     

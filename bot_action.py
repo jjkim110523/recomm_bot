@@ -6,14 +6,14 @@ def query_for_top5(db_path, product_type):
     c=conn.cursor()
 
     rows= c.execute("select brand_name,product_name, product_img, product_vol, \
-    product_price from products where product_type=? and product_rank between 1 and 5", product_type)
+    product_price from products where product_type=? and product_rank between 1 and 5", (str(product_type),))
 
     contents=rows.fetchall()
     c.close()
 
     return contents
 
-def query_for_heavy_check(db_path, product_type, user_name):
+def query_for_heavy_check(db_path, user_name):
     conn=sqlite3.connect(db_path)
 
     c=conn.cursor()

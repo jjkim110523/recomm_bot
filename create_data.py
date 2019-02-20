@@ -53,7 +53,7 @@ def create_basic_dict(db_path):
 
 
 
-def create_interaction_matrix(df, user_col, item_col, rating_col, norm= True, threshold = 0):
+def create_interaction_matrix(df, user_col, item_col, rating_col, norm= True, threshold = 3):
     '''
     데이터 프레임 형태의 interation 행렬 데이터를 만들기 위한 기능입니다.
     요구되는 입력 값 -

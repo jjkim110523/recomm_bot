@@ -118,7 +118,7 @@ def recommendation_user(user_id, product_type, threshold = 0, nrec_items = 5, sh
     return return_score_list
 
 if __name__=="__main__":
-	db_path="./glow_db.sqlite3"
+	db_path=
 	conn=sqlite3.connect(db_path)
 	c=conn.cursor()
 	rows=c.execute("SELECT DISTINCT product_type FROM products")
